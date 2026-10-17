@@ -1,0 +1,345 @@
+package com.resqgo.app
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.sqrt
+
+/**
+ * The ride session. Runs as a foreground service so it keeps watching
+ * while the rider uses Rapido, Zomato, Google Maps or anything else.
+ */
+class RideService : Service(), SensorEventListener, LocationListener {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val detector = CrashDetector()
+    private val recent = ArrayDeque<Sample>() // last 25 s of readings, for the trigger log
+    private var alarmSnapshot: List<Sample> = emptyList()
+    private var speedKmh = -1f
+    private var running = false
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var player: MediaPlayer? = null
+    private var savedAlarmVolume = -1
+    private var alarmJob: Job? = null
+    private var sosJob: Job? = null
+
+    private class Sample(val t: Long, val g: Float, val kmh: Float)
+
+    override fun onBind(intent: Intent?) = null
+
+    override fun onCreate() {
+        super.onCreate()
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CH_RIDE, "Ride monitoring", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(
+            NotificationChannel(CH_ALARM, "Crash alarm", NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null) // the service plays the alarm itself, at alarm volume
+                enableVibration(false)
+            }
+        )
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_STOP -> { stopRide(); return START_NOT_STICKY }
+            ACTION_IM_OK -> imOk()
+            ACTION_IM_SAFE -> imSafe()
+            ACTION_SOS_NOW -> if (ensureRunning()) sendSos(manual = true)
+            else -> ensureRunning() // ACTION_START, or Android restarting us after a kill
+        }
+        if (!running) stopSelf()
+        return START_STICKY
+    }
+
+    private fun ensureRunning(): Boolean {
+        if (running) return true
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(ID_RIDE, rideNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            } else {
+                startForeground(ID_RIDE, rideNotification())
+            }
+        } catch (e: Exception) { // location permission missing, or Android refused a background start
+            return false
+        }
+        running = true
+        // ponytail: CPU stays awake for the whole ride so sensor readings keep coming with the
+        // screen off. Measure the battery cost in field tests; try wake-up sensors if it's too high.
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "resqgo:ride")
+            .apply { acquire(12 * 60 * 60 * 1000L) }
+        val sm = getSystemService(SensorManager::class.java)
+        sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) // about 50 readings a second
+        }
+        try {
+            getSystemService(LocationManager::class.java)
+                .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+        } catch (e: SecurityException) {
+            // No GPS permission: detection still runs, with the stricter no-speed threshold.
+        }
+        detector.reset()
+        RideState.phase.value = Phase.MONITORING
+        return true
+    }
+
+    // ---------- sensors ----------
+
+    override fun onSensorChanged(event: SensorEvent) {
+        val t = SystemClock.elapsedRealtime()
+        val (x, y, z) = event.values
+        val g = sqrt(x * x + y * y + z * z) / SensorManager.GRAVITY_EARTH
+        recent.addLast(Sample(t, g, speedKmh))
+        while (recent.first().t < t - 25_000) recent.removeFirst()
+
+        if (RideState.phase.value != Phase.MONITORING) return
+        when (detector.onAccel(t, g.toDouble())) {
+            Event.CRASH -> startAlarm()
+            Event.CANCELLED -> saveTrigger("moved_on", recent.toList())
+            else -> {}
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    override fun onLocationChanged(location: Location) {
+        RideState.lastLocation = location
+        if (location.hasSpeed()) {
+            speedKmh = location.speed * 3.6f
+            detector.onSpeed(SystemClock.elapsedRealtime(), speedKmh.toDouble())
+        }
+    }
+
+    // Android 9 and 10 call these and crash if the app doesn't implement them.
+    override fun onProviderEnabled(provider: String) {}
+    override fun onProviderDisabled(provider: String) {}
+    @Deprecated("Needed on Android 9 and 10")
+    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+
+    // ---------- alarm, SOS, cancel ----------
+
+    private fun startAlarm() {
+        val secs = Prefs(this).timerSec
+        alarmSnapshot = recent.toList() // covers the impact; saved once we know the outcome
+        RideState.alarmEndsAt = SystemClock.elapsedRealtime() + secs * 1000L
+        RideState.phase.value = Phase.ALARM
+        notifications().notify(ID_ALARM, alarmNotification(secs))
+        soundOn()
+        alarmJob = scope.launch {
+            delay(secs * 1000L)
+            sendSos(manual = false)
+        }
+    }
+
+    private fun imOk() {
+        if (RideState.phase.value != Phase.ALARM) return
+        alarmJob?.cancel()
+        soundOff()
+        notifications().cancel(ID_ALARM)
+        saveTrigger("rider_ok", alarmSnapshot)
+        detector.reset()
+        RideState.phase.value = Phase.MONITORING
+    }
+
+    private fun sendSos(manual: Boolean) {
+        val was = RideState.phase.value
+        if (was == Phase.SOS) return
+        alarmJob?.cancel()
+        soundOff()
+        if (was == Phase.ALARM && !manual) saveTrigger("no_response", alarmSnapshot)
+        RideState.phase.value = Phase.SOS
+        notifications().notify(ID_ALARM, sosNotification())
+        sosJob = scope.launch {
+            val sim = SosSender.sendAlert(this@RideService, manual)
+            SosSender.callPrimary(this@RideService, sim)
+            // ponytail: a fixed 5 updates, 2 minutes apart. Switch to "until someone replies"
+            // once contacts have a way to acknowledge.
+            repeat(5) {
+                delay(2 * 60_000L)
+                SosSender.sendUpdate(this@RideService, sim)
+            }
+        }
+    }
+
+    private fun imSafe() {
+        if (RideState.phase.value != Phase.SOS) return
+        sosJob?.cancel()
+        notifications().cancel(ID_ALARM)
+        detector.reset()
+        RideState.phase.value = Phase.MONITORING
+        scope.launch { SosSender.sendImSafe(this@RideService) }
+    }
+
+    private fun stopRide() {
+        cleanup()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        cleanup()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    private fun cleanup() {
+        if (running) {
+            getSystemService(SensorManager::class.java).unregisterListener(this)
+            getSystemService(LocationManager::class.java).removeUpdates(this)
+            wakeLock?.let { if (it.isHeld) it.release() }
+            wakeLock = null
+            running = false
+        }
+        alarmJob?.cancel()
+        sosJob?.cancel()
+        soundOff()
+        notifications().cancel(ID_ALARM)
+        RideState.phase.value = Phase.IDLE
+    }
+
+    // ---------- sound ----------
+
+    private fun soundOn() {
+        val am = getSystemService(AudioManager::class.java)
+        runCatching { // throws in Do Not Disturb on some phones; the alarm still plays at the current volume
+            savedAlarmVolume = am.getStreamVolume(AudioManager.STREAM_ALARM)
+            am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
+        }
+        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        player = runCatching {
+            MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                setDataSource(this@RideService, uri)
+                isLooping = true
+                prepare()
+                start()
+            }
+        }.getOrNull()
+        vibrator()?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 800, 400), 0))
+    }
+
+    private fun soundOff() {
+        player?.let { runCatching { it.stop() }; it.release() }
+        player = null
+        vibrator()?.cancel()
+        if (savedAlarmVolume >= 0) {
+            runCatching { getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_ALARM, savedAlarmVolume, 0) }
+            savedAlarmVolume = -1
+        }
+    }
+
+    @Suppress("DEPRECATION") // VibratorManager needs Android 12; this works on all versions
+    private fun vibrator(): Vibrator? = getSystemService(Vibrator::class.java)
+
+    // ---------- trigger log (training data for the ML step) ----------
+
+    /** Saves the readings around an alarm, labelled by what happened. Only with the rider's consent. */
+    private fun saveTrigger(label: String, samples: List<Sample>) {
+        if (samples.isEmpty() || !Prefs(this).logConsent) return
+        // ponytail: written on the main thread; ~1,250 short lines take a few ms. Move off-thread if logs grow.
+        val dir = File(filesDir, "triggers").apply { mkdirs() }
+        val name = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + "-$label.csv"
+        val t0 = samples.first().t
+        File(dir, name).bufferedWriter().use { w ->
+            w.write("t_ms,accel_g,speed_kmh\n")
+            for (s in samples) {
+                w.write("${s.t - t0},${"%.3f".format(Locale.US, s.g)},${"%.1f".format(Locale.US, s.kmh)}\n")
+            }
+        }
+    }
+
+    // ---------- notifications ----------
+
+    private fun notifications() = getSystemService(NotificationManager::class.java)
+
+    private fun serviceIntent(action: String, code: Int) = PendingIntent.getService(
+        this, code, Intent(this, RideService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun openScreen(cls: Class<*>, code: Int) = PendingIntent.getActivity(
+        this, code, Intent(this, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun button(title: String, intent: PendingIntent) =
+        Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), title, intent).build()
+
+    private fun rideNotification() = Notification.Builder(this, CH_RIDE)
+        .setSmallIcon(R.drawable.ic_stat)
+        .setContentTitle("RESQGO is watching your ride")
+        .setContentText("If you crash and can't respond, your contacts get your location.")
+        .setContentIntent(openScreen(MainActivity::class.java, 10))
+        .setOngoing(true)
+        .addAction(button("Stop ride", serviceIntent(ACTION_STOP, 11)))
+        .build()
+
+    private fun alarmNotification(secs: Int) = Notification.Builder(this, CH_ALARM)
+        .setSmallIcon(R.drawable.ic_stat)
+        .setContentTitle("Possible crash detected")
+        .setContentText("Tap I'm OK, or SOS goes to your contacts in $secs s.")
+        .setCategory(Notification.CATEGORY_ALARM)
+        .setFullScreenIntent(openScreen(AlarmActivity::class.java, 20), true)
+        .setContentIntent(openScreen(AlarmActivity::class.java, 21))
+        .setOngoing(true)
+        .addAction(button("I'm OK", serviceIntent(ACTION_IM_OK, 22)))
+        .build()
+
+    private fun sosNotification() = Notification.Builder(this, CH_ALARM)
+        .setSmallIcon(R.drawable.ic_stat)
+        .setContentTitle("SOS sent to your contacts")
+        .setContentText("Your location goes out again every 2 minutes.")
+        .setContentIntent(openScreen(AlarmActivity::class.java, 30))
+        .setOngoing(true)
+        .addAction(button("I'm safe", serviceIntent(ACTION_IM_SAFE, 31)))
+        .build()
+
+    companion object {
+        const val ACTION_START = "com.resqgo.app.START"
+        const val ACTION_STOP = "com.resqgo.app.STOP"
+        const val ACTION_IM_OK = "com.resqgo.app.IM_OK"
+        const val ACTION_SOS_NOW = "com.resqgo.app.SOS_NOW"
+        const val ACTION_IM_SAFE = "com.resqgo.app.IM_SAFE"
+        private const val CH_RIDE = "ride"
+        private const val CH_ALARM = "alarm"
+        private const val ID_RIDE = 1
+        private const val ID_ALARM = 2
+    }
+}

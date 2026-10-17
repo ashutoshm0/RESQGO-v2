@@ -1,0 +1,8 @@
+<resources>
+    <color name="icon_background">#C62828</color>
+
+    <!-- Only the window behind Compose; the app's colours live in Ui.kt. -->
+    <style name="Theme.Resqgo" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FAF5ED</item>
+    </style>
+</resources>
