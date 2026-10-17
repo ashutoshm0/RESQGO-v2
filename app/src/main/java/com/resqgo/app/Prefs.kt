@@ -24,6 +24,21 @@ class Prefs(ctx: Context) {
         get() = sp.getBoolean("log", false)
         set(v) = sp.edit().putBoolean("log", v).apply()
 
+    /** Pilot rider code like R01. Uploads carry this instead of a name. */
+    var riderId: String
+        get() = sp.getString("rider", "").orEmpty()
+        set(v) = sp.edit().putString("rider", v).apply()
+
+    /** Where the rider keeps the phone: one of PLACEMENTS. */
+    var placement: String
+        get() = sp.getString("placement", "pocket").orEmpty()
+        set(v) = sp.edit().putString("placement", v).apply()
+
+    /** Staged crash tests only: no speed check, and every alert is marked TEST. */
+    var testMode: Boolean
+        get() = sp.getBoolean("test", false)
+        set(v) = sp.edit().putBoolean("test", v).apply()
+
     /** First contact is the primary one: they also get the phone call. */
     var contacts: List<Contact>
         get() = sp.getString("contacts", "").orEmpty().lines()
@@ -33,8 +48,12 @@ class Prefs(ctx: Context) {
 
     companion object {
         val TIMER_CHOICES = listOf(20, 30, 45, 60)
+        val PLACEMENTS = listOf("pocket", "mount", "bag", "other")
     }
 }
+
+/** R01-style code: letters, digits and dashes, at most 10. Safe in file names. */
+fun cleanRiderId(raw: String) = raw.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(10)
 
 /** Keeps digits and a leading +; null if it can't be a phone number. */
 fun cleanPhone(raw: String): String? {

@@ -20,6 +20,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         Resumes.count++ // re-check the setup list after the rider comes back from Settings
+        Uploader.flushSoon(this) // send any pilot data waiting from earlier rides
     }
 }
 

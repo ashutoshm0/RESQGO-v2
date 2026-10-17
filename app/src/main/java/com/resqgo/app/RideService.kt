@@ -37,6 +37,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 /**
@@ -45,18 +46,44 @@ import kotlin.math.sqrt
  */
 class RideService : Service(), SensorEventListener, LocationListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val detector = CrashDetector()
-    private val recent = ArrayDeque<Sample>() // last 25 s of readings, for the trigger log
+    private var detector = CrashDetector()
+    private val recent = ArrayDeque<Sample>() // last 25 s of readings, for the sensor log
     private var alarmSnapshot: List<Sample> = emptyList()
     private var speedKmh = -1f
+    private var gx = Float.NaN
+    private var gy = Float.NaN
+    private var gz = Float.NaN
     private var running = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var player: MediaPlayer? = null
     private var savedAlarmVolume = -1
     private var alarmJob: Job? = null
     private var sosJob: Job? = null
+    private var alarmIsTest = false
 
-    private class Sample(val t: Long, val g: Float, val kmh: Float)
+    // ride diary, fixed when the ride starts
+    private var testMode = false
+    private var logConsent = false
+    private var hasGyro = false
+    private var rider = "unknown"
+    private var rideName = ""
+    private var rideStartedAt = 0L
+    private var batteryStart: Int? = null
+    private var alarms = 0
+    private var riderOk = 0
+    private var sosCount = 0
+    private var movedOn = 0
+    private var bumpsSeen = 0
+    private var bumpsSaved = 0
+    private var bumpAt = -1L
+    private var lastCheckpoint = 0L
+    private var checkpoints = 0
+
+    /** Accelerometer in m/s², gyroscope in rad/s (NaN when the phone has none). */
+    private class Sample(
+        val t: Long, val ax: Float, val ay: Float, val az: Float,
+        val gx: Float, val gy: Float, val gz: Float, val kmh: Float,
+    )
 
     override fun onBind(intent: Intent?) = null
 
@@ -78,6 +105,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
             ACTION_IM_OK -> imOk()
             ACTION_IM_SAFE -> imSafe()
             ACTION_SOS_NOW -> if (ensureRunning()) sendSos(manual = true)
+            ACTION_TEST_ALARM -> if (ensureRunning() && RideState.phase.value == Phase.MONITORING) startAlarm(test = true)
             else -> ensureRunning() // ACTION_START, or Android restarting us after a kill
         }
         if (!running) stopSelf()
@@ -97,7 +125,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         }
         running = true
         // ponytail: CPU stays awake for the whole ride so sensor readings keep coming with the
-        // screen off. Measure the battery cost in field tests; try wake-up sensors if it's too high.
+        // screen off. The ride diary measures the battery cost; try wake-up sensors if it's too high.
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "resqgo:ride")
             .apply { acquire(12 * 60 * 60 * 1000L) }
@@ -105,13 +133,16 @@ class RideService : Service(), SensorEventListener, LocationListener {
         sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
             sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) // about 50 readings a second
         }
+        val gyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE) // many budget phones don't have one
+        hasGyro = gyro != null
+        gyro?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         try {
             getSystemService(LocationManager::class.java)
                 .requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
         } catch (e: SecurityException) {
             // No GPS permission: detection still runs, with the stricter no-speed threshold.
         }
-        detector.reset()
+        startDiary() // after the sensors, so the first checkpoint knows about the gyroscope
         RideState.phase.value = Phase.MONITORING
         return true
     }
@@ -119,17 +150,36 @@ class RideService : Service(), SensorEventListener, LocationListener {
     // ---------- sensors ----------
 
     override fun onSensorChanged(event: SensorEvent) {
-        val t = SystemClock.elapsedRealtime()
         val (x, y, z) = event.values
+        if (event.sensor.type == Sensor.TYPE_GYROSCOPE) {
+            gx = x; gy = y; gz = z
+            return
+        }
+        val t = SystemClock.elapsedRealtime()
         val g = sqrt(x * x + y * y + z * z) / SensorManager.GRAVITY_EARTH
-        recent.addLast(Sample(t, g, speedKmh))
+        recent.addLast(Sample(t, x, y, z, gx, gy, gz, speedKmh))
         while (recent.first().t < t - 25_000) recent.removeFirst()
+
+        if (t - lastCheckpoint >= 60_000) checkpoint(t)
+        watchBumps(t, g)
 
         if (RideState.phase.value != Phase.MONITORING) return
         when (detector.onAccel(t, g.toDouble())) {
-            Event.CRASH -> startAlarm()
-            Event.CANCELLED -> saveTrigger("moved_on", recent.toList())
+            Event.CRASH -> startAlarm(test = false)
+            Event.CANCELLED -> { movedOn++; saveWindow("moved_on", recent.toList()) }
             else -> {}
+        }
+    }
+
+    /** Potholes and speed breakers: 6-second clips that teach the ML model what isn't a crash. */
+    private fun watchBumps(t: Long, g: Float) {
+        if (bumpAt < 0 && g >= BUMP_G) {
+            bumpsSeen++
+            if (bumpsSaved < MAX_BUMP_FILES) bumpAt = t
+        } else if (bumpAt >= 0 && t - bumpAt >= 3_000) {
+            saveWindow("bump", recent.filter { it.t >= bumpAt - 3_000 })
+            bumpsSaved++
+            bumpAt = -1L
         }
     }
 
@@ -151,8 +201,10 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     // ---------- alarm, SOS, cancel ----------
 
-    private fun startAlarm() {
+    private fun startAlarm(test: Boolean) {
         val secs = Prefs(this).timerSec
+        alarmIsTest = test
+        if (!test) alarms++
         alarmSnapshot = recent.toList() // covers the impact; saved once we know the outcome
         RideState.alarmEndsAt = SystemClock.elapsedRealtime() + secs * 1000L
         RideState.phase.value = Phase.ALARM
@@ -169,7 +221,8 @@ class RideService : Service(), SensorEventListener, LocationListener {
         alarmJob?.cancel()
         soundOff()
         notifications().cancel(ID_ALARM)
-        saveTrigger("rider_ok", alarmSnapshot)
+        if (!alarmIsTest) { riderOk++; saveWindow("rider_ok", alarmSnapshot) }
+        alarmIsTest = false
         detector.reset()
         RideState.phase.value = Phase.MONITORING
     }
@@ -179,17 +232,19 @@ class RideService : Service(), SensorEventListener, LocationListener {
         if (was == Phase.SOS) return
         alarmJob?.cancel()
         soundOff()
-        if (was == Phase.ALARM && !manual) saveTrigger("no_response", alarmSnapshot)
+        if (was == Phase.ALARM && !manual && !alarmIsTest) saveWindow("no_response", alarmSnapshot)
+        val test = alarmIsTest || testMode
+        sosCount++
         RideState.phase.value = Phase.SOS
         notifications().notify(ID_ALARM, sosNotification())
         sosJob = scope.launch {
-            val sim = SosSender.sendAlert(this@RideService, manual)
+            val sim = SosSender.sendAlert(this@RideService, manual, test)
             SosSender.callPrimary(this@RideService, sim)
             // ponytail: a fixed 5 updates, 2 minutes apart. Switch to "until someone replies"
             // once contacts have a way to acknowledge.
             repeat(5) {
                 delay(2 * 60_000L)
-                SosSender.sendUpdate(this@RideService, sim)
+                SosSender.sendUpdate(this@RideService, sim, test)
             }
         }
     }
@@ -198,13 +253,20 @@ class RideService : Service(), SensorEventListener, LocationListener {
         if (RideState.phase.value != Phase.SOS) return
         sosJob?.cancel()
         notifications().cancel(ID_ALARM)
+        alarmIsTest = false
         detector.reset()
         RideState.phase.value = Phase.MONITORING
         scope.launch { SosSender.sendImSafe(this@RideService) }
     }
 
     private fun stopRide() {
+        if (running) {
+            val csv = rideCsv("stopped")
+            Uploader.queue(this, rideName) { csv }
+            File(filesDir, "current-$rideName").delete()
+        }
         cleanup()
+        Uploader.flushSoon(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -229,6 +291,67 @@ class RideService : Service(), SensorEventListener, LocationListener {
         notifications().cancel(ID_ALARM)
         RideState.phase.value = Phase.IDLE
     }
+
+    // ---------- ride diary (one row per ride in the pilot sheet) ----------
+
+    private fun startDiary() {
+        Uploader.recoverInterrupted(this) // a previous ride that Android killed
+        val p = Prefs(this)
+        testMode = p.testMode
+        logConsent = p.logConsent
+        rider = p.riderId.ifBlank { "unknown" }
+        detector = CrashDetector(if (testMode) Thresholds(minSpeedKmh = 0.0, noGpsImpactG = 4.0) else Thresholds())
+        rideStartedAt = System.currentTimeMillis()
+        rideName = "ride-$rider-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(rideStartedAt))}.csv"
+        batteryStart = SosSender.battery(this)
+        alarms = 0; riderOk = 0; sosCount = 0; movedOn = 0; bumpsSeen = 0; bumpsSaved = 0
+        bumpAt = -1L; checkpoints = 0
+        checkpoint(SystemClock.elapsedRealtime())
+    }
+
+    /** Saved every minute as "interrupted": if Android kills the ride, this row is what survives. */
+    private fun checkpoint(t: Long) {
+        lastCheckpoint = t
+        runCatching { File(filesDir, "current-$rideName").writeText(rideCsv("interrupted")) }
+        if (++checkpoints % 15 == 0) Uploader.flushSoon(this) // upload during long rides too
+    }
+
+    private fun rideCsv(ended: String): String {
+        val minutes = (System.currentTimeMillis() - rideStartedAt) / 60_000.0
+        val row = listOf(
+            rider, "${Build.MANUFACTURER} ${Build.MODEL}".replace(',', ' '), Build.VERSION.RELEASE,
+            BuildConfig.VERSION_NAME, Prefs(this).placement, if (testMode) 1 else 0, if (hasGyro) 1 else 0,
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(rideStartedAt)),
+            "%.1f".format(Locale.US, minutes), batteryStart ?: "", SosSender.battery(this) ?: "",
+            alarms, riderOk, sosCount, movedOn, bumpsSeen, bumpsSaved, ended,
+        )
+        return "rider,phone,android,app,placement,test_mode,gyro,started,minutes,battery_start,battery_end," +
+            "alarms,rider_ok,sos,moved_on,bumps_seen,bumps_saved,ended\n" + row.joinToString(",") + "\n"
+    }
+
+    // ---------- sensor log (training data for the ML step) ----------
+
+    /** Queues one labelled clip for upload. Only with the rider's consent. Staged tests get a staged_ label. */
+    private fun saveWindow(label: String, samples: List<Sample>) {
+        if (samples.isEmpty() || !logConsent) return
+        val tag = if (testMode) "staged_$label" else label
+        val name = "$rider-${SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date())}-$tag.csv"
+        val t0 = samples.first().t
+        Uploader.queue(this, name) {
+            buildString {
+                append("t_ms,ax,ay,az,gx,gy,gz,speed_kmh\n")
+                for (s in samples) {
+                    append(s.t - t0).append(',')
+                    append(r(s.ax, 100)).append(',').append(r(s.ay, 100)).append(',').append(r(s.az, 100)).append(',')
+                    append(r(s.gx, 1000)).append(',').append(r(s.gy, 1000)).append(',').append(r(s.gz, 1000)).append(',')
+                    append(if (s.kmh < 0) "" else r(s.kmh, 10)).append('\n')
+                }
+            }
+        }
+    }
+
+    /** Rounds to 1/[per]; empty for a missing reading. Faster than String.format for 1,250 rows. */
+    private fun r(v: Float, per: Int): String = if (v.isNaN()) "" else ((v * per).roundToLong() / per.toDouble()).toString()
 
     // ---------- sound ----------
 
@@ -270,23 +393,6 @@ class RideService : Service(), SensorEventListener, LocationListener {
     @Suppress("DEPRECATION") // VibratorManager needs Android 12; this works on all versions
     private fun vibrator(): Vibrator? = getSystemService(Vibrator::class.java)
 
-    // ---------- trigger log (training data for the ML step) ----------
-
-    /** Saves the readings around an alarm, labelled by what happened. Only with the rider's consent. */
-    private fun saveTrigger(label: String, samples: List<Sample>) {
-        if (samples.isEmpty() || !Prefs(this).logConsent) return
-        // ponytail: written on the main thread; ~1,250 short lines take a few ms. Move off-thread if logs grow.
-        val dir = File(filesDir, "triggers").apply { mkdirs() }
-        val name = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + "-$label.csv"
-        val t0 = samples.first().t
-        File(dir, name).bufferedWriter().use { w ->
-            w.write("t_ms,accel_g,speed_kmh\n")
-            for (s in samples) {
-                w.write("${s.t - t0},${"%.3f".format(Locale.US, s.g)},${"%.1f".format(Locale.US, s.kmh)}\n")
-            }
-        }
-    }
-
     // ---------- notifications ----------
 
     private fun notifications() = getSystemService(NotificationManager::class.java)
@@ -304,7 +410,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     private fun rideNotification() = Notification.Builder(this, CH_RIDE)
         .setSmallIcon(R.drawable.ic_stat)
-        .setContentTitle("RESQGO is watching your ride")
+        .setContentTitle(if (Prefs(this).testMode) "RESQGO test mode is on" else "RESQGO is watching your ride")
         .setContentText("If you crash and can't respond, your contacts get your location.")
         .setContentIntent(openScreen(MainActivity::class.java, 10))
         .setOngoing(true)
@@ -313,7 +419,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     private fun alarmNotification(secs: Int) = Notification.Builder(this, CH_ALARM)
         .setSmallIcon(R.drawable.ic_stat)
-        .setContentTitle("Possible crash detected")
+        .setContentTitle(if (alarmIsTest) "Test alarm" else "Possible crash detected")
         .setContentText("Tap I'm OK, or SOS goes to your contacts in $secs s.")
         .setCategory(Notification.CATEGORY_ALARM)
         .setFullScreenIntent(openScreen(AlarmActivity::class.java, 20), true)
@@ -337,9 +443,12 @@ class RideService : Service(), SensorEventListener, LocationListener {
         const val ACTION_IM_OK = "com.resqgo.app.IM_OK"
         const val ACTION_SOS_NOW = "com.resqgo.app.SOS_NOW"
         const val ACTION_IM_SAFE = "com.resqgo.app.IM_SAFE"
+        const val ACTION_TEST_ALARM = "com.resqgo.app.TEST_ALARM"
         private const val CH_RIDE = "ride"
         private const val CH_ALARM = "alarm"
         private const val ID_RIDE = 1
         private const val ID_ALARM = 2
+        private const val BUMP_G = 2.5f
+        private const val MAX_BUMP_FILES = 20 // per ride, so a bad road doesn't flood the upload
     }
 }

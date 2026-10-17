@@ -76,6 +76,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
@@ -247,6 +248,12 @@ fun HomeScreen(onSetup: () -> Unit) {
             ) {
                 Text(if (riding) "Stop ride" else "Start ride", fontSize = 26.sp, fontWeight = FontWeight.Bold)
             }
+            if (Prefs(ctx).testMode) {
+                Text(
+                    "TEST MODE is on: the speed check is off and every alert is marked TEST. Turn it off in Safety setup after staged tests.",
+                    color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold,
+                )
+            }
             if (!riding) {
                 Text(
                     "No destination needed. Use any app while you ride; RESQGO keeps watching.",
@@ -334,10 +341,20 @@ fun SetupScreen(onDone: () -> Unit) {
     var newPhone by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     val sends by RideState.sends.collectAsState()
+    var riderId by remember { mutableStateOf(prefs.riderId) }
+    var placement by remember { mutableStateOf(prefs.placement) }
+    var testMode by remember { mutableStateOf(prefs.testMode) }
+    val waiting by Uploader.waiting.collectAsState()
+    val uploadStatus by Uploader.status.collectAsState()
     val testAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
         if (granted[Manifest.permission.SEND_SMS] == true) scope.launch { SosSender.sendTest(ctx) }
         else error = "Allow SMS so RESQGO can send the test."
     }
+    val alarmAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted[Manifest.permission.ACCESS_FINE_LOCATION] == true) ctx.ride(RideService.ACTION_TEST_ALARM)
+        else error = "Allow precise location so RESQGO can run the test."
+    }
+    LaunchedEffect(Unit) { Uploader.flushSoon(ctx) } // refreshes the "waiting" count too
     BackHandler(onBack = onDone)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val small = MaterialTheme.typography.bodySmall
@@ -412,11 +429,53 @@ fun SetupScreen(onDone: () -> Unit) {
             Switch(checked = logging, onCheckedChange = { logging = it; prefs.logConsent = it })
         }
 
+        Section("Pilot")
+        OutlinedTextField(
+            value = riderId,
+            onValueChange = { riderId = cleanRiderId(it); prefs.riderId = riderId },
+            label = { Text("Rider ID, like R01") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+        )
+        Text("Where is the phone during rides?")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Prefs.PLACEMENTS.forEach { pl ->
+                FilterChip(
+                    selected = placement == pl, onClick = { placement = pl; prefs.placement = pl },
+                    label = { Text(pl.replaceFirstChar(Char::uppercase)) },
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Test mode")
+                Text(
+                    "Staged crash tests only. Skips the speed check and marks every alert TEST. Applies from the next ride.",
+                    style = small, color = muted,
+                )
+            }
+            Switch(checked = testMode, onCheckedChange = { testMode = it; prefs.testMode = it })
+        }
+        Text(
+            if (Uploader.enabled()) "Waiting to upload: $waiting files. $uploadStatus" else uploadStatus,
+            style = small, color = muted,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { Uploader.flushSoon(ctx) }, enabled = Uploader.enabled()) { Text("Upload now") }
+            OutlinedButton(onClick = { sharePilotData(ctx) }) { Text("Share pilot data") }
+        }
+
         Section("Check that SOS works")
         Button(
             onClick = { testAsk.launch(arrayOf(Manifest.permission.SEND_SMS, Manifest.permission.READ_PHONE_STATE)) },
             enabled = contacts.isNotEmpty(), modifier = Modifier.fillMaxWidth(),
         ) { Text("Send test SOS") }
+        OutlinedButton(
+            onClick = { alarmAsk.launch(ridePermissions()) },
+            enabled = contacts.isNotEmpty(), modifier = Modifier.fillMaxWidth(),
+        ) { Text("Test the full alarm") }
+        Text(
+            "Starts a ride and rings the alarm. If nobody taps I'm OK, your contacts get an SMS marked TEST.",
+            style = small, color = muted,
+        )
         sends.forEach { SendRow(it) }
         Spacer(Modifier.height(24.dp))
     }
@@ -499,6 +558,16 @@ fun AlarmScreen(phase: Phase) {
             }
         }
     }
+}
+
+/** Backup for uploads: zip of every file on this phone, sent by hand over WhatsApp, Drive or Bluetooth. */
+private fun sharePilotData(ctx: Context) {
+    val zip = Uploader.exportZip(ctx) // ponytail: zips on the main thread; a few MB takes under a second
+    val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", zip)
+    val send = Intent(Intent.ACTION_SEND).setType("application/zip")
+        .putExtra(Intent.EXTRA_STREAM, uri)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    ctx.startActivity(Intent.createChooser(send, "Share pilot data"))
 }
 
 /** WhatsApp can't be sent automatically, so the rider shares it themselves if they can. */

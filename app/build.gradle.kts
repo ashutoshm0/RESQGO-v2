@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Pilot upload target (pilot/Code.gs deployed in your Google account). Lives in
+// local.properties, which git ignores. Empty = no upload; "Share pilot data" still works.
+val local = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
 
 android {
@@ -11,12 +19,15 @@ android {
         applicationId = "com.resqgo.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+        buildConfigField("String", "UPLOAD_URL", "\"${local.getProperty("RESQGO_UPLOAD_URL", "")}\"")
+        buildConfigField("String", "UPLOAD_KEY", "\"${local.getProperty("RESQGO_UPLOAD_KEY", "")}\"")
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

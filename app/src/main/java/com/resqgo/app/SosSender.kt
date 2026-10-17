@@ -29,11 +29,12 @@ import kotlin.coroutines.resume
 /** Locale.US so the link never gets a comma decimal or non-Latin digits. No API key needed. */
 fun mapsLink(lat: Double, lng: Double) = "https://maps.google.com/?q=%.5f,%.5f".format(Locale.US, lat, lng)
 
-fun alertText(name: String, manual: Boolean, time: String, link: String?, battery: Int?) = buildString {
-    append("RESQGO ALERT: $name ${if (manual) "pressed SOS" else "may have crashed"} at $time.\n")
+fun alertText(name: String, manual: Boolean, time: String, link: String?, battery: Int?, test: Boolean = false) = buildString {
+    append(if (test) "RESQGO TEST ALERT (practice only, no action needed): " else "RESQGO ALERT: ")
+    append("$name ${if (manual) "pressed SOS" else "may have crashed"} at $time.\n")
     append("Location: ${link ?: "not available"}\n")
     if (battery != null) append("Battery $battery%.\n")
-    append("If you can't reach $name, call 112 (ambulance 108).")
+    append(if (test) "This is a test of the RESQGO app." else "If you can't reach $name, call 112 (ambulance 108).")
 }
 
 /**
@@ -42,11 +43,13 @@ fun alertText(name: String, manual: Boolean, time: String, link: String?, batter
  */
 object SosSender {
 
-    suspend fun sendAlert(ctx: Context, manual: Boolean): Int? = sendToAll(ctx, shareText(ctx, manual), "SMS")
+    suspend fun sendAlert(ctx: Context, manual: Boolean, test: Boolean): Int? =
+        sendToAll(ctx, shareText(ctx, manual, test), "SMS")
 
-    suspend fun sendUpdate(ctx: Context, sim: Int?) {
+    suspend fun sendUpdate(ctx: Context, sim: Int?, test: Boolean) {
         val link = location(ctx)?.let { mapsLink(it.latitude, it.longitude) } ?: return
-        sendToAll(ctx, "RESQGO update: ${Prefs(ctx).displayName}'s location at ${now()}:\n$link", "Update", sim)
+        val head = if (test) "RESQGO TEST update" else "RESQGO update"
+        sendToAll(ctx, "$head: ${Prefs(ctx).displayName}'s location at ${now()}:\n$link", "Update", sim)
     }
 
     suspend fun sendImSafe(ctx: Context) {
@@ -59,9 +62,9 @@ object SosSender {
     }
 
     /** The alert text, also used by the Share on WhatsApp button. */
-    fun shareText(ctx: Context, manual: Boolean = true): String = alertText(
+    fun shareText(ctx: Context, manual: Boolean = true, test: Boolean = false): String = alertText(
         Prefs(ctx).displayName, manual, now(),
-        location(ctx)?.let { mapsLink(it.latitude, it.longitude) }, battery(ctx)
+        location(ctx)?.let { mapsLink(it.latitude, it.longitude) }, battery(ctx), test
     )
 
     /** Calls the primary contact on the SIM that just worked, so a dual-SIM phone never shows a SIM chooser. */
@@ -189,7 +192,7 @@ object SosSender {
         return known ?: RideState.lastLocation
     }
 
-    private fun battery(ctx: Context): Int? = ctx.getSystemService(BatteryManager::class.java)
+    fun battery(ctx: Context): Int? = ctx.getSystemService(BatteryManager::class.java)
         .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).takeIf { it in 0..100 }
 
     private fun now(): String = SimpleDateFormat("h:mm a", Locale.ENGLISH).format(Date())
