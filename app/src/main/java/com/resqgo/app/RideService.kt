@@ -75,6 +75,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
     private var movedOn = 0
     private var bumpsSeen = 0
     private var bumpsSaved = 0
+    private var mlFlagged = 0 // alarms the ML model scored as false alarms (shadow mode)
     private var bumpAt = -1L
     private var lastCheckpoint = 0L
     private var checkpoints = 0
@@ -161,10 +162,10 @@ class RideService : Service(), SensorEventListener, LocationListener {
         while (recent.first().t < t - 25_000) recent.removeFirst()
 
         if (t - lastCheckpoint >= 60_000) checkpoint(t)
-        watchBumps(t, g)
 
-        if (RideState.phase.value != Phase.MONITORING) return
-        when (detector.onAccel(t, g.toDouble())) {
+        val event = if (RideState.phase.value == Phase.MONITORING) detector.onAccel(t, g.toDouble()) else Event.NONE
+        watchBumps(t, g)
+        when (event) {
             Event.CRASH -> startAlarm(test = false)
             Event.CANCELLED -> { movedOn++; saveWindow("moved_on", recent.toList()) }
             else -> {}
@@ -173,6 +174,10 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     /** Potholes and speed breakers: 6-second clips that teach the ML model what isn't a crash. */
     private fun watchBumps(t: Long, g: Float) {
+        if (detector.watching || RideState.phase.value != Phase.MONITORING) {
+            bumpAt = -1L // the alarm or moved_on clip already covers this hit
+            return
+        }
         if (bumpAt < 0 && g >= BUMP_G) {
             bumpsSeen++
             if (bumpsSaved < MAX_BUMP_FILES) bumpAt = t
@@ -206,6 +211,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         alarmIsTest = test
         if (!test) alarms++
         alarmSnapshot = recent.toList() // covers the impact; saved once we know the outcome
+        if (!test) mlScore(alarmSnapshot)?.let { if (it < (model?.threshold ?: 0.0)) mlFlagged++ }
         RideState.alarmEndsAt = SystemClock.elapsedRealtime() + secs * 1000L
         RideState.phase.value = Phase.ALARM
         notifications().notify(ID_ALARM, alarmNotification(secs))
@@ -304,7 +310,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         rideStartedAt = System.currentTimeMillis()
         rideName = "ride-$rider-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(rideStartedAt))}.csv"
         batteryStart = SosSender.battery(this)
-        alarms = 0; riderOk = 0; sosCount = 0; movedOn = 0; bumpsSeen = 0; bumpsSaved = 0
+        alarms = 0; riderOk = 0; sosCount = 0; movedOn = 0; bumpsSeen = 0; bumpsSaved = 0; mlFlagged = 0
         bumpAt = -1L; checkpoints = 0
         checkpoint(SystemClock.elapsedRealtime())
     }
@@ -323,10 +329,28 @@ class RideService : Service(), SensorEventListener, LocationListener {
             BuildConfig.VERSION_NAME, Prefs(this).placement, if (testMode) 1 else 0, if (hasGyro) 1 else 0,
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(rideStartedAt)),
             "%.1f".format(Locale.US, minutes), batteryStart ?: "", SosSender.battery(this) ?: "",
-            alarms, riderOk, sosCount, movedOn, bumpsSeen, bumpsSaved, ended,
+            alarms, riderOk, sosCount, movedOn, bumpsSeen, bumpsSaved, ended, mlFlagged,
         )
         return "rider,phone,android,app,placement,test_mode,gyro,started,minutes,battery_start,battery_end," +
-            "alarms,rider_ok,sos,moved_on,bumps_seen,bumps_saved,ended\n" + row.joinToString(",") + "\n"
+            "alarms,rider_ok,sos,moved_on,bumps_seen,bumps_saved,ended,ml_flagged\n" + row.joinToString(",") + "\n"
+    }
+
+    // ---------- ML model, shadow mode: it scores, it never stops an alarm ----------
+
+    private val model by lazy { CrashModel.get(this) }
+
+    private fun mlScore(s: List<Sample>): Double? {
+        val m = model ?: return null
+        if (s.size < 50) return null
+        return m.score(
+            crashFeatures(
+                DoubleArray(s.size) { s[it].t.toDouble() },
+                DoubleArray(s.size) { s[it].ax.toDouble() },
+                DoubleArray(s.size) { s[it].ay.toDouble() },
+                DoubleArray(s.size) { s[it].az.toDouble() },
+                DoubleArray(s.size) { if (s[it].kmh < 0) Double.NaN else s[it].kmh.toDouble() },
+            )
+        )
     }
 
     // ---------- sensor log (training data for the ML step) ----------
@@ -339,6 +363,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         val t0 = samples.first().t
         Uploader.queue(this, name) {
             buildString {
+                mlScore(samples)?.let { append("# model=${model?.version} ml_score=${"%.4f".format(Locale.US, it)}\n") }
                 append("t_ms,ax,ay,az,gx,gy,gz,speed_kmh\n")
                 for (s in samples) {
                     append(s.t - t0).append(',')

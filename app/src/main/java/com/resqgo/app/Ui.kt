@@ -428,6 +428,14 @@ fun SetupScreen(onDone: () -> Unit) {
             }
             Switch(checked = logging, onCheckedChange = { logging = it; prefs.logConsent = it })
         }
+        Text(
+            when (val m = remember { CrashModel.get(ctx) }) {
+                null -> "No ML model in this build."
+                else -> (if (m.demo) "ML model: demo, trained on made-up data." else "ML model ${m.version}.") +
+                    " Shadow mode: it records a score with each clip and never stops an alarm."
+            },
+            style = small, color = muted,
+        )
 
         Section("Pilot")
         OutlinedTextField(

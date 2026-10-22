@@ -19,8 +19,8 @@ android {
         applicationId = "com.resqgo.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         buildConfigField("String", "UPLOAD_URL", "\"${local.getProperty("RESQGO_UPLOAD_URL", "")}\"")
         buildConfigField("String", "UPLOAD_KEY", "\"${local.getProperty("RESQGO_UPLOAD_KEY", "")}\"")
     }
@@ -41,4 +41,5 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303") // Android's org.json is a stub in local unit tests
 }

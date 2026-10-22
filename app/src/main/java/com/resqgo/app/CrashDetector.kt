@@ -36,6 +36,9 @@ class CrashDetector(private val th: Thresholds = Thresholds()) {
         impactAt = -1L
     }
 
+    /** True between an impact and its verdict: that clip belongs to the alarm, not to the bump log. */
+    val watching get() = impactAt >= 0
+
     /** Feed every accelerometer reading: [g] is total acceleration in g (1.0 = resting). */
     fun onAccel(t: Long, g: Double): Event {
         if (impactAt < 0) return checkImpact(t, g)
