@@ -26,6 +26,17 @@ import kotlin.coroutines.resume
 
 // ---------- message text (plain functions, unit-tested) ----------
 
+/** wa.me wants the country code and no plus sign. Ten digits means an Indian mobile. */
+fun waNumber(phone: String): String {
+    val d = phone.filter(Char::isDigit)
+    return if (d.length == 10) "91$d" else d
+}
+
+/** Opens that contact's WhatsApp chat with the alert already typed; the rider taps send. */
+fun waLink(phone: String, text: String): String =
+    "https://wa.me/${waNumber(phone)}?text=" +
+        java.net.URLEncoder.encode(text, "UTF-8").replace("+", "%20")
+
 /** Locale.US so the link never gets a comma decimal or non-Latin digits. No API key needed. */
 fun mapsLink(lat: Double, lng: Double) = "https://maps.google.com/?q=%.5f,%.5f".format(Locale.US, lat, lng)
 

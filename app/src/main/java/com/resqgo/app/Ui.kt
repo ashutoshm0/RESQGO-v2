@@ -249,7 +249,12 @@ fun HomeScreen(onSetup: () -> Unit, onMap: () -> Unit = {}) {
             ) {
                 Text(if (riding) "Stop ride" else "Start ride", fontSize = 26.sp, fontWeight = FontWeight.Bold)
             }
-            if (Prefs(ctx).testMode) {
+            if (Prefs(ctx).demoMode) {
+                Text(
+                    "DEMO MODE is on: a shake sets off the alarm, and the SMS and call that follow are real.",
+                    color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold,
+                )
+            } else if (Prefs(ctx).testMode) {
                 Text(
                     "TEST MODE is on: the speed check is off and every alert is marked TEST. Turn it off in Safety setup after staged tests.",
                     color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold,
@@ -351,6 +356,7 @@ fun SetupScreen(onDone: () -> Unit) {
     var riderId by remember { mutableStateOf(prefs.riderId) }
     var placement by remember { mutableStateOf(prefs.placement) }
     var testMode by remember { mutableStateOf(prefs.testMode) }
+    var demoMode by remember { mutableStateOf(prefs.demoMode) }
     val waiting by Uploader.waiting.collectAsState()
     val uploadStatus by Uploader.status.collectAsState()
     val testAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
@@ -426,6 +432,19 @@ fun SetupScreen(onDone: () -> Unit) {
             }
         }
         Text("Nothing longer than 60 s. Help shouldn't wait.", style = small, color = muted)
+
+        Section("Demo mode")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("A shake sets off the alarm")
+                Text(
+                    "For showing the app indoors, where there is no riding speed. The SMS and call that " +
+                        "follow are real, so use your own number or someone who knows. Turn this off before riding.",
+                    style = small, color = muted,
+                )
+            }
+            Switch(checked = demoMode, onCheckedChange = { demoMode = it; prefs.demoMode = it })
+        }
 
         Section("Improve detection")
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -563,8 +582,19 @@ fun AlarmScreen(phase: Phase) {
                 )
                 sends.forEach { SendRow(it) }
                 Spacer(Modifier.weight(1f))
-                OutlinedButton(onClick = { shareOnWhatsApp(ctx) }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Share on WhatsApp")
+                val contacts = remember { Prefs(ctx).contacts }
+                if (contacts.isNotEmpty()) {
+                    Text(
+                        "WhatsApp can't send by itself. Tap a contact to open the chat with the alert ready.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                contacts.forEach { c ->
+                    OutlinedButton(
+                        onClick = { openWhatsApp(ctx, c.phone) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("WhatsApp ${c.name}") }
                 }
                 Button(
                     onClick = { ctx.ride(RideService.ACTION_IM_SAFE) },
@@ -595,12 +625,20 @@ private fun sharePilotData(ctx: Context) {
     ctx.startActivity(Intent.createChooser(send, "Share pilot data"))
 }
 
-/** WhatsApp can't be sent automatically, so the rider shares it themselves if they can. */
-private fun shareOnWhatsApp(ctx: Context) {
-    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, SosSender.shareText(ctx))
-    try {
-        ctx.startActivity(Intent(send).setPackage("com.whatsapp"))
-    } catch (e: ActivityNotFoundException) {
-        ctx.startActivity(Intent.createChooser(send, "Share your location"))
+/**
+ * No app may send WhatsApp messages on someone's behalf, so this opens that contact's chat with
+ * the alert already typed. The rider taps send. Falls back to the share sheet without WhatsApp.
+ */
+private fun openWhatsApp(ctx: Context, phone: String) {
+    val text = SosSender.shareText(ctx)
+    val uri = Uri.parse(waLink(phone, text))
+    // WhatsApp, then WhatsApp Business, then any app that opens the link. A browser would only
+    // bounce the rider back to WhatsApp, so the share sheet is the last resort.
+    for (pkg in listOf("com.whatsapp", "com.whatsapp.w4b")) {
+        val i = Intent(Intent.ACTION_VIEW, uri).setPackage(pkg)
+        if (runCatching { ctx.startActivity(i) }.isSuccess) return
     }
+    if (runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, uri)) }.isSuccess) return
+    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+    ctx.startActivity(Intent.createChooser(send, "Share your location"))
 }

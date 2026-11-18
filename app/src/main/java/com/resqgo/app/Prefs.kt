@@ -39,6 +39,11 @@ class Prefs(ctx: Context) {
         get() = sp.getBoolean("test", false)
         set(v) = sp.edit().putBoolean("test", v).apply()
 
+    /** Showing the app to people: a shake sets the alarm off, and the SOS that follows is real. */
+    var demoMode: Boolean
+        get() = sp.getBoolean("demo", false)
+        set(v) = sp.edit().putBoolean("demo", v).apply()
+
     /** First contact is the primary one: they also get the phone call. */
     var contacts: List<Contact>
         get() = sp.getString("contacts", "").orEmpty().lines()

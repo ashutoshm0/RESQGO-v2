@@ -17,7 +17,23 @@ data class Thresholds(
     val stillToleranceG: Double = 0.35, // |g - 1| above this counts as movement
     val maxMovingFraction: Double = 0.15,
     val rodeOnKmh: Double = 10.0,       // GPS speed above this after impact = rider carried on
-)
+) {
+    companion object {
+        /**
+         * For showing the app indoors: a firm shake of the phone sets the alarm off about two
+         * seconds later, with no GPS speed needed. Far too twitchy for a real ride.
+         */
+        fun demo() = Thresholds(
+            impactG = 2.5,
+            noGpsImpactG = 2.5,
+            minSpeedKmh = 0.0,
+            settleMs = 300,
+            stillWindowMs = 1_500,
+            maxMovingFraction = 0.95,
+            rodeOnKmh = Double.MAX_VALUE, // a GPS fix must never cancel a demo
+        )
+    }
+}
 
 enum class Event { NONE, IMPACT, CRASH, CANCELLED }
 

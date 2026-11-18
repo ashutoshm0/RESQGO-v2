@@ -63,6 +63,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     // ride diary, fixed when the ride starts
     private var testMode = false
+    private var demoMode = false
     private var logConsent = false
     private var hasGyro = false
     private var rider = "unknown"
@@ -304,9 +305,16 @@ class RideService : Service(), SensorEventListener, LocationListener {
         Uploader.recoverInterrupted(this) // a previous ride that Android killed
         val p = Prefs(this)
         testMode = p.testMode
+        demoMode = p.demoMode
         logConsent = p.logConsent
         rider = p.riderId.ifBlank { "unknown" }
-        detector = CrashDetector(if (testMode) Thresholds(minSpeedKmh = 0.0, noGpsImpactG = 4.0) else Thresholds())
+        detector = CrashDetector(
+            when {
+                demoMode -> Thresholds.demo()
+                testMode -> Thresholds(minSpeedKmh = 0.0, noGpsImpactG = 4.0)
+                else -> Thresholds()
+            }
+        )
         rideStartedAt = System.currentTimeMillis()
         rideName = "ride-$rider-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(rideStartedAt))}.csv"
         batteryStart = SosSender.battery(this)
@@ -435,7 +443,15 @@ class RideService : Service(), SensorEventListener, LocationListener {
 
     private fun rideNotification() = Notification.Builder(this, CH_RIDE)
         .setSmallIcon(R.drawable.ic_stat)
-        .setContentTitle(if (Prefs(this).testMode) "RESQGO test mode is on" else "RESQGO is watching your ride")
+        .setContentTitle(
+            Prefs(this).let {
+                when {
+                    it.demoMode -> "RESQGO demo mode is on"
+                    it.testMode -> "RESQGO test mode is on"
+                    else -> "RESQGO is watching your ride"
+                }
+            }
+        )
         .setContentText("If you crash and can't respond, your contacts get your location.")
         .setContentIntent(openScreen(MainActivity::class.java, 10))
         .setOngoing(true)

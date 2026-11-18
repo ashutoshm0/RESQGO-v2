@@ -83,6 +83,35 @@ class CrashDetectorTest {
         }
     }
 
+    @Test fun demoModeTurnsAShakeIndoorsIntoAnAlarm() {
+        val r = Ride()
+        r.detector.reset()
+        val demo = CrashDetector(Thresholds.demo())
+        var fired = false
+        var t = 0L
+        // Phone held still on a table, no GPS fix at all: nothing happens.
+        while (t < 4_000) {
+            if (demo.onAccel(t, still(t)) == Event.CRASH) fired = true
+            t += 20
+        }
+        assertTrue("a resting phone must not alarm", !fired)
+        // One firm shake, then set down.
+        while (t < 4_200) { demo.onAccel(t, 3.0); t += 20 }
+        while (t < 7_000) {
+            if (demo.onAccel(t, still(t)) == Event.CRASH) fired = true
+            t += 20
+        }
+        assertTrue("a shake should alarm in demo mode", fired)
+    }
+
+    @Test fun whatsAppLinksCarryTheCountryCodeAndTheText() {
+        assertEquals("919812345678", waNumber("98123 45678"))
+        assertEquals("919812345678", waNumber("+91 98123-45678"))
+        val link = waLink("9812345678", "Ravi may have crashed at 9:42 PM")
+        assertTrue(link, link.startsWith("https://wa.me/919812345678?text="))
+        assertTrue(link, "Ravi%20may%20have%20crashed" in link)
+    }
+
     @Test fun phoneNumbersAreCleaned() {
         assertEquals("+919812345678", cleanPhone("+91 98123-45678"))
         assertEquals("9812345678", cleanPhone("98123 45678"))
