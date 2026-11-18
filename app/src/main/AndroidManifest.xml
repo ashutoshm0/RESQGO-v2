@@ -24,6 +24,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Resqgo">
 
+        <!-- Value comes from MAPS_API_KEY in local.properties, so the key never enters git. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${mapsApiKey}" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

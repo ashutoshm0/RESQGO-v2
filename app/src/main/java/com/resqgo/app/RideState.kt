@@ -15,5 +15,10 @@ object RideState {
 
     /** SystemClock.elapsedRealtime() when the alarm turns into an SOS. */
     @Volatile var alarmEndsAt = 0L
-    @Volatile var lastLocation: Location? = null
+
+    /** A flow so the map screen follows the rider; read `.value` where you just need the latest fix. */
+    val location = MutableStateFlow<Location?>(null)
+    var lastLocation: Location?
+        get() = location.value
+        set(v) { location.value = v }
 }

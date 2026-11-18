@@ -144,7 +144,8 @@ fun App() {
         when {
             phase == Phase.ALARM || phase == Phase.SOS -> AlarmScreen(phase)
             screen == "setup" -> SetupScreen(onDone = { screen = "home" })
-            else -> HomeScreen(onSetup = { screen = "setup" })
+            screen == "map" -> MapScreen(onBack = { screen = "home" })
+            else -> HomeScreen(onSetup = { screen = "setup" }, onMap = { screen = "map" })
         }
     }
 }
@@ -176,7 +177,7 @@ private fun todos(ctx: Context): List<Todo> {
 // ---------- home ----------
 
 @Composable
-fun HomeScreen(onSetup: () -> Unit) {
+fun HomeScreen(onSetup: () -> Unit, onMap: () -> Unit = {}) {
     val ctx = LocalContext.current
     val phase by RideState.phase.collectAsState()
     val riding = phase != Phase.IDLE
@@ -276,7 +277,13 @@ fun HomeScreen(onSetup: () -> Unit) {
                 }
             }
 
-            TextButton(onClick = onSetup) { Text("Safety setup") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onSetup) { Text("Safety setup") }
+                TextButton(onClick = {
+                    lastKnownLocation(ctx)?.let { RideState.lastLocation = it } // so the map opens on the rider
+                    onMap()
+                }) { Text("Map") }
+            }
             Spacer(Modifier.height(110.dp)) // keeps content clear of the SOS button
         }
 
@@ -566,6 +573,16 @@ fun AlarmScreen(phase: Phase) {
             }
         }
     }
+}
+
+/** The phone's last fix, for screens that open before any ride has started. */
+fun lastKnownLocation(ctx: Context): android.location.Location? = try {
+    val lm = ctx.getSystemService(android.location.LocationManager::class.java)
+    listOf(android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)
+        .mapNotNull { lm.getLastKnownLocation(it) }
+        .maxByOrNull { it.time }
+} catch (e: SecurityException) {
+    null
 }
 
 /** Backup for uploads: zip of every file on this phone, sent by hand over WhatsApp, Drive or Bluetooth. */

@@ -23,6 +23,11 @@ android {
         versionName = "0.3.0"
         buildConfigField("String", "UPLOAD_URL", "\"${local.getProperty("RESQGO_UPLOAD_URL", "")}\"")
         buildConfigField("String", "UPLOAD_KEY", "\"${local.getProperty("RESQGO_UPLOAD_KEY", "")}\"")
+
+        // Google Maps key, also from local.properties. Empty = the map tab says so and the rest still works.
+        val maps = local.getProperty("MAPS_API_KEY", "")
+        manifestPlaceholders["mapsApiKey"] = maps
+        buildConfigField("String", "MAPS_API_KEY", "\"$maps\"")
     }
 
     buildFeatures {
@@ -39,6 +44,8 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.03.01"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("com.google.maps.android:maps-compose:6.2.1")
+    implementation("com.google.android.gms:play-services-maps:19.0.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303") // Android's org.json is a stub in local unit tests
