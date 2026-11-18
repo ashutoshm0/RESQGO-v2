@@ -77,6 +77,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
     private var bumpsSeen = 0
     private var bumpsSaved = 0
     private var mlFlagged = 0 // alarms the ML model scored as false alarms (shadow mode)
+    private var lastUiPush = 0L
     private var bumpAt = -1L
     private var lastCheckpoint = 0L
     private var checkpoints = 0
@@ -163,6 +164,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         while (recent.first().t < t - 25_000) recent.removeFirst()
 
         if (t - lastCheckpoint >= 60_000) checkpoint(t)
+        pushToUi(t, g)
 
         val event = if (RideState.phase.value == Phase.MONITORING) detector.onAccel(t, g.toDouble()) else Event.NONE
         watchBumps(t, g)
@@ -171,6 +173,21 @@ class RideService : Service(), SensorEventListener, LocationListener {
             Event.CANCELLED -> { movedOn++; saveWindow("moved_on", recent.toList()) }
             else -> {}
         }
+    }
+
+    /**
+     * Feeds the live panel on the home screen. Sensors arrive about 50 times a second, which is far
+     * more than a screen needs, so this pushes ten times a second and keeps 8 seconds of history.
+     */
+    private fun pushToUi(t: Long, g: Float) {
+        if (t - lastUiPush < 100) return
+        lastUiPush = t
+        RideState.accelG.value = g
+        RideState.gyroDps.value = if (gx.isNaN()) Float.NaN
+        else Math.toDegrees(sqrt(gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
+        RideState.speedKmh.value = speedKmh
+        RideState.impact.value = detector.watching
+        RideState.trace.value = (RideState.trace.value + g).takeLast(TRACE_POINTS)
     }
 
     /** Potholes and speed breakers: 6-second clips that teach the ML model what isn't a crash. */
@@ -296,6 +313,8 @@ class RideService : Service(), SensorEventListener, LocationListener {
         sosJob?.cancel()
         soundOff()
         notifications().cancel(ID_ALARM)
+        RideState.trace.value = emptyList()
+        RideState.impact.value = false
         RideState.phase.value = Phase.IDLE
     }
 
@@ -490,6 +509,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         private const val ID_RIDE = 1
         private const val ID_ALARM = 2
         private const val BUMP_G = 2.5f
+        private const val TRACE_POINTS = 80 // 8 seconds at ten a second
         private const val MAX_BUMP_FILES = 20 // per ride, so a bad road doesn't flood the upload
     }
 }

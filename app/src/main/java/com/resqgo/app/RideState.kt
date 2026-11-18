@@ -16,6 +16,17 @@ object RideState {
     /** SystemClock.elapsedRealtime() when the alarm turns into an SOS. */
     @Volatile var alarmEndsAt = 0L
 
+    /** Live sensor readings for the demo panel. Pushed about ten times a second, not at sensor rate. */
+    val accelG = MutableStateFlow(1f)
+    val gyroDps = MutableStateFlow(0f)
+    val speedKmh = MutableStateFlow(-1f)
+
+    /** The last few seconds of acceleration, oldest first, for the live graph. */
+    val trace = MutableStateFlow<List<Float>>(emptyList())
+
+    /** Set when the rules see a hit, cleared when the verdict lands. Drives the "impact" flash. */
+    val impact = MutableStateFlow(false)
+
     /** A flow so the map screen follows the rider; read `.value` where you just need the latest fix. */
     val location = MutableStateFlow<Location?>(null)
     var lastLocation: Location?

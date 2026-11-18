@@ -200,96 +200,132 @@ fun HomeScreen(onSetup: () -> Unit, onMap: () -> Unit = {}) {
         afterPermissions(it, RideService.ACTION_SOS_NOW)
     }
 
+    val prefs = remember(Resumes.count) { Prefs(ctx) }
+    val demo = remember(Resumes.count) { prefs.demoMode }
+    // Only the reminders the rider must act on themselves; blockers always show.
+    var showTodo by remember(Resumes.count) { mutableStateOf(!prefs.setupSeen) }
+    val blocking = todo.filter { it.fix == null }
+    val reminders = if (showTodo) todo.filter { it.fix != null } else emptyList()
+
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+            Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                buildAnnotatedString {
-                    append("RES")
-                    withStyle(SpanStyle(color = SosRed)) { append("Q") }
-                    append("GO")
-                },
-                fontSize = 40.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp,
-                modifier = Modifier.padding(top = 12.dp),
-            )
-            Text("Ride safe. Help faster.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    buildAnnotatedString {
+                        append("RES")
+                        withStyle(SpanStyle(color = SosRed)) { append("Q") }
+                        append("GO")
+                    },
+                    fontSize = 28.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp,
+                )
+                Spacer(Modifier.weight(1f))
                 Box(
                     Modifier.size(10.dp).clip(CircleShape)
                         .background(if (riding) okColor() else MaterialTheme.colorScheme.onSurfaceVariant)
                 )
                 Text(
-                    if (riding) "Monitoring on. The alarm waits ${Prefs(ctx).timerSec} s before SOS." else "Not monitoring",
-                    style = MaterialTheme.typography.bodyMedium,
+                    if (riding) "Monitoring" else "Off",
+                    Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
                 )
             }
 
-            Button(
-                onClick = {
-                    when {
-                        riding -> ctx.ride(RideService.ACTION_STOP)
-                        todo.any { it.fix == null } -> onSetup()
-                        else -> startAsk.launch(ridePermissions())
-                    }
-                },
-                shape = CircleShape,
-                modifier = Modifier.padding(vertical = 8.dp).size(200.dp),
-                colors = if (riding) {
-                    ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
+            if (demo) {
+                Text(
+                    "DEMO MODE: a shake sets off the alarm, and the SMS and call that follow are real.",
+                    color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                SensorPanel(riding, Modifier.fillMaxWidth())
+            } else {
+                if (prefs.testMode) {
+                    Text(
+                        "TEST MODE: every alert is marked TEST.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                     )
-                } else {
-                    ButtonDefaults.buttonColors()
-                },
+                }
+                Surface(
+                    onClick = {
+                        lastKnownLocation(ctx)?.let { RideState.lastLocation = it }
+                        onMap()
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Where to?",
+                        Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                        fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                HomeMap(
+                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(14.dp))
+                )
+            }
+
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text(if (riding) "Stop ride" else "Start ride", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            }
-            if (Prefs(ctx).demoMode) {
-                Text(
-                    "DEMO MODE is on: a shake sets off the alarm, and the SMS and call that follow are real.",
-                    color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold,
-                )
-            } else if (Prefs(ctx).testMode) {
-                Text(
-                    "TEST MODE is on: the speed check is off and every alert is marked TEST. Turn it off in Safety setup after staged tests.",
-                    color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold,
-                )
-            }
-            if (!riding) {
-                Text(
-                    "No destination needed. Use any app while you ride; RESQGO keeps watching.",
-                    textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+                note?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
-            note?.let { Text(it, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
-
-            todo.forEach { t ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp, bottom = 4.dp)) {
-                        Text(t.text)
-                        TextButton(
-                            onClick = { if (t.fix == null) onSetup() else runCatching { ctx.startActivity(t.fix) } },
-                            contentPadding = PaddingValues(0.dp),
-                        ) { Text(if (t.fix == null) "Open safety setup" else "Open settings") }
+                (blocking + reminders).forEach { t ->
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp, bottom = 4.dp)) {
+                            Text(t.text, style = MaterialTheme.typography.bodyMedium)
+                            Row {
+                                TextButton(
+                                    onClick = { if (t.fix == null) onSetup() else runCatching { ctx.startActivity(t.fix) } },
+                                    contentPadding = PaddingValues(0.dp),
+                                ) { Text(if (t.fix == null) "Open safety setup" else "Open settings") }
+                                if (t.fix != null) {
+                                    Spacer(Modifier.weight(1f))
+                                    TextButton(
+                                        onClick = { prefs.setupSeen = true; showTodo = false },
+                                        contentPadding = PaddingValues(0.dp),
+                                    ) { Text("Got it") }
+                                }
+                            }
+                        }
                     }
                 }
-            }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onSetup) { Text("Safety setup") }
-                TextButton(onClick = {
-                    lastKnownLocation(ctx)?.let { RideState.lastLocation = it } // so the map opens on the rider
-                    onMap()
-                }) { Text("Map") }
+                Button(
+                    onClick = {
+                        when {
+                            riding -> ctx.ride(RideService.ACTION_STOP)
+                            blocking.isNotEmpty() -> onSetup()
+                            else -> startAsk.launch(ridePermissions())
+                        }
+                    },
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth().height(68.dp),
+                    colors = if (riding) {
+                        ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        )
+                    } else {
+                        ButtonDefaults.buttonColors()
+                    },
+                ) {
+                    Text(if (riding) "Stop ride" else "Start ride", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                }
+
+                Row {
+                    TextButton(onClick = onSetup) { Text("Safety setup") }
+                    if (demo) {
+                        TextButton(onClick = {
+                            lastKnownLocation(ctx)?.let { RideState.lastLocation = it }
+                            onMap()
+                        }) { Text("Map") }
+                    }
+                }
+                Spacer(Modifier.height(96.dp)) // keeps content clear of the SOS button
             }
-            Spacer(Modifier.height(110.dp)) // keeps content clear of the SOS button
         }
 
         SosHoldButton(

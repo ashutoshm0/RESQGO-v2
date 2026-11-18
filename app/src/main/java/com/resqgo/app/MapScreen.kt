@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -54,6 +55,61 @@ import com.google.maps.android.compose.rememberMarkerState
 import kotlinx.coroutines.launch
 
 private val DELHI = LatLng(28.6139, 77.2090) // only until the first GPS fix arrives
+
+/**
+ * The map on the home screen. If Google never draws it, say so plainly rather than leaving a grey
+ * rectangle: that happens when the key has no Maps SDK for Android, which MAPS.md explains.
+ */
+@Composable
+fun HomeMap(modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val location by RideState.location.collectAsState()
+    val here = location?.let { LatLng(it.latitude, it.longitude) }
+    var drew by remember { mutableStateOf(false) }
+    var slow by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { kotlinx.coroutines.delay(8_000); slow = true }
+
+    val camera = rememberCameraPositionState { position = CameraPosition.fromLatLngZoom(here ?: DELHI, 15f) }
+    var followed by remember { mutableStateOf(false) }
+    LaunchedEffect(here) {
+        if (!followed) here?.let { camera.position = CameraPosition.fromLatLngZoom(it, 16f); followed = true }
+    }
+
+    Box(modifier) {
+        if (MapsApi.configured()) {
+            val fine = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+            GoogleMap(
+                modifier = Modifier.fillMaxSize(),
+                cameraPositionState = camera,
+                properties = MapProperties(isMyLocationEnabled = fine),
+                uiSettings = MapUiSettings(zoomControlsEnabled = false, myLocationButtonEnabled = false),
+                onMapLoaded = { drew = true },
+            )
+        }
+        if (!drew && (slow || !MapsApi.configured())) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
+                Column(
+                    Modifier.fillMaxSize().padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("Map not available", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (MapsApi.configured()) {
+                            "Turn on Maps SDK for Android for this key. Search and routes already work."
+                        } else {
+                            "No Google Maps key in this build."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
 fun MapScreen(onBack: () -> Unit) {

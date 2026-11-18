@@ -19,6 +19,11 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("timer", 30)
         set(v) = sp.edit().putInt("timer", v).apply()
 
+    /** The set-up reminders on Home are shown until the rider says they have read them. */
+    var setupSeen: Boolean
+        get() = sp.getBoolean("setupSeen", false)
+        set(v) = sp.edit().putBoolean("setupSeen", v).apply()
+
     /** Rider agreed to keep sensor data around alarms, for tuning detection. */
     var logConsent: Boolean
         get() = sp.getBoolean("log", false)
