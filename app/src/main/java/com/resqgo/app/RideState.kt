@@ -18,7 +18,11 @@ object RideState {
 
     /** Live sensor readings for the demo panel. Pushed about ten times a second, not at sensor rate. */
     val accelG = MutableStateFlow(1f)
-    val gyroDps = MutableStateFlow(0f)
+    val gyroDps = MutableStateFlow(Float.NaN)
+
+    /** Degrees the phone is tipped away from lying flat. Budget phones have no gyroscope, but
+     *  every phone has an accelerometer, and a crashed bike's phone ends up on its side. */
+    val tiltDeg = MutableStateFlow(0f)
     val speedKmh = MutableStateFlow(-1f)
 
     /** The last few seconds of acceleration, oldest first, for the live graph. */

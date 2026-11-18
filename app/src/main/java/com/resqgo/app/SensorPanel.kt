@@ -41,6 +41,7 @@ private const val TOP_G = 8f
 fun SensorPanel(riding: Boolean, modifier: Modifier = Modifier) {
     val g by RideState.accelG.collectAsState()
     val gyro by RideState.gyroDps.collectAsState()
+    val tilt by RideState.tiltDeg.collectAsState()
     val speed by RideState.speedKmh.collectAsState()
     val trace by RideState.trace.collectAsState()
     val impact by RideState.impact.collectAsState()
@@ -60,10 +61,13 @@ fun SensorPanel(riding: Boolean, modifier: Modifier = Modifier) {
                 "Force", if (riding) "%.1f".format(peak) else "—",
                 if (hot) "g peak" else "g", if (hot) danger else accent, Modifier.weight(1f),
             )
+            // Budget phones ship without a gyroscope, so fall back to the tilt the
+            // accelerometer gives. A crashed bike's phone ends up lying on its side.
+            val spun = !gyro.isNaN()
             Reading(
-                "Rotation",
-                if (!riding || gyro.isNaN()) "—" else "%.0f".format(gyro),
-                if (gyro.isNaN() && riding) "no gyroscope" else "°/s",
+                if (spun) "Rotation" else "Tilt",
+                if (!riding) "—" else "%.0f".format(if (spun) gyro else tilt),
+                if (spun) "°/s" else "° from flat",
                 accent, Modifier.weight(1f),
             )
             Reading(

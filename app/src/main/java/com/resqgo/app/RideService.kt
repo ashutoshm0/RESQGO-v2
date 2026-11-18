@@ -37,6 +37,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.acos
 import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
@@ -53,6 +54,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
     private var gx = Float.NaN
     private var gy = Float.NaN
     private var gz = Float.NaN
+    private var tilt = 0f
     private var running = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var player: MediaPlayer? = null
@@ -159,7 +161,9 @@ class RideService : Service(), SensorEventListener, LocationListener {
             return
         }
         val t = SystemClock.elapsedRealtime()
-        val g = sqrt(x * x + y * y + z * z) / SensorManager.GRAVITY_EARTH
+        val total = sqrt(x * x + y * y + z * z)
+        tilt = if (total == 0f) 0f else Math.toDegrees(acos((z / total).coerceIn(-1f, 1f)).toDouble()).toFloat()
+        val g = total / SensorManager.GRAVITY_EARTH
         recent.addLast(Sample(t, x, y, z, gx, gy, gz, speedKmh))
         while (recent.first().t < t - 25_000) recent.removeFirst()
 
@@ -185,6 +189,7 @@ class RideService : Service(), SensorEventListener, LocationListener {
         RideState.accelG.value = g
         RideState.gyroDps.value = if (gx.isNaN()) Float.NaN
         else Math.toDegrees(sqrt(gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
+        RideState.tiltDeg.value = tilt
         RideState.speedKmh.value = speedKmh
         RideState.impact.value = detector.watching
         RideState.trace.value = (RideState.trace.value + g).takeLast(TRACE_POINTS)
