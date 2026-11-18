@@ -262,7 +262,11 @@ fun HomeScreen(onSetup: () -> Unit, onMap: () -> Unit = {}) {
                     )
                 }
                 HomeMap(
-                    Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(14.dp))
+                    onSearch = {
+                        lastKnownLocation(ctx)?.let { RideState.lastLocation = it }
+                        onMap()
+                    },
+                    modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(14.dp)),
                 )
             }
 

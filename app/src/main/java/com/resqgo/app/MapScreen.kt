@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -61,7 +63,7 @@ private val DELHI = LatLng(28.6139, 77.2090) // only until the first GPS fix arr
  * rectangle: that happens when the key has no Maps SDK for Android, which MAPS.md explains.
  */
 @Composable
-fun HomeMap(modifier: Modifier = Modifier) {
+fun HomeMap(onSearch: () -> Unit, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     val location by RideState.location.collectAsState()
     val here = location?.let { LatLng(it.latitude, it.longitude) }
@@ -87,24 +89,29 @@ fun HomeMap(modifier: Modifier = Modifier) {
                 onMapLoaded = { drew = true },
             )
         }
+        // Google draws nothing without Maps SDK for Android on the key. Rather than leave a dead
+        // grey panel, offer what does work: search a place, get the route, hand over to Google Maps.
         if (!drew && (slow || !MapsApi.configured())) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
+            Surface(
+                onClick = onSearch,
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
                 Column(
                     Modifier.fillMaxSize().padding(24.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Map not available", fontWeight = FontWeight.SemiBold)
+                    Text("Plan your ride", fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        if (MapsApi.configured()) {
-                            "Turn on Maps SDK for Android for this key. Search and routes already work."
-                        } else {
-                            "No Google Maps key in this build."
-                        },
+                        "Search any place to see the distance and the two-wheeler route, then hand it to Google Maps.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
                     )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Tap to search", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -124,6 +131,9 @@ fun MapScreen(onBack: () -> Unit) {
     var route by remember { mutableStateOf<Route?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var mapDrew by remember { mutableStateOf(false) }
+    var mapSlow by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { kotlinx.coroutines.delay(8_000); mapSlow = true }
 
     val camera = rememberCameraPositionState { position = CameraPosition.fromLatLngZoom(here ?: DELHI, 15f) }
     var followed by remember { mutableStateOf(false) }
@@ -208,10 +218,32 @@ fun MapScreen(onBack: () -> Unit) {
                     cameraPositionState = camera,
                     properties = MapProperties(isMyLocationEnabled = fineGranted),
                     uiSettings = MapUiSettings(zoomControlsEnabled = false, myLocationButtonEnabled = fineGranted),
+                    onMapLoaded = { mapDrew = true },
                 ) {
                     here?.let { Marker(state = rememberMarkerState(position = it), title = "You") }
                     destination?.let { Marker(state = rememberMarkerState(position = it.at), title = it.name) }
                     route?.let { Polyline(points = it.points, color = MaterialTheme.colorScheme.primary, width = 14f) }
+                }
+
+                if (!mapDrew && mapSlow) {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceVariant) {
+                        Column(
+                            Modifier.fillMaxSize().padding(24.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                if (destination == null) {
+                                    "Search a place above to see its distance and route."
+                                } else {
+                                    "Route ready. The distance and time are below."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
                 }
 
                 location?.let { loc ->
